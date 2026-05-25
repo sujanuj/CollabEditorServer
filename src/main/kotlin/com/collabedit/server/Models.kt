@@ -4,9 +4,6 @@ import io.ktor.websocket.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/**
- * Represents one connected client in a session.
- */
 data class Client(
     val siteId: String,
     val userName: String,
@@ -14,10 +11,6 @@ data class Client(
     val session: DefaultWebSocketSession
 )
 
-/**
- * Represents one active editing session.
- * Multiple clients connect to the same session to collaborate.
- */
 class EditorSession(val sessionId: String) {
     private val clients = mutableMapOf<String, Client>()
     private val operationHistory = mutableListOf<String>()
@@ -60,11 +53,14 @@ class EditorSession(val sessionId: String) {
     suspend fun isEmpty(): Boolean = mutex.withLock {
         clients.isEmpty()
     }
+
+    // Returns all connected clients except the one specified
+    // Used to tell a newly joined client who is already in the session
+    suspend fun getExistingClients(excludeSiteId: String): List<Client> = mutex.withLock {
+        clients.values.filter { it.siteId != excludeSiteId }
+    }
 }
 
-/**
- * Message types sent between client and server.
- */
 object MessageType {
     const val JOIN = "JOIN"
     const val LEAVE = "LEAVE"

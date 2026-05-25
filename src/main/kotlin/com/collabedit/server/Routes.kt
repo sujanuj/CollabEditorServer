@@ -34,11 +34,15 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                     val type = json.get("type")?.asString ?: continue
 
                     when (type) {
+
                         MessageType.JOIN -> {
                             val siteId = json.get("siteId").asString
                             val userName = json.get("userName").asString
                             val userColor = json.get("userColor").asString
                             clientSiteId = siteId
+
+                            // Get existing clients BEFORE adding the new one
+                            val existingClients = session.getExistingClients(excludeSiteId = siteId)
 
                             val client = Client(
                                 siteId = siteId,
@@ -48,15 +52,36 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                             )
                             session.addClient(client)
 
+                            // Get history and sort by clock for causal ordering
                             val history = session.getHistory()
+                            val sortedHistory = history.sortedBy { opJson ->
+                                try {
+                                    JsonParser.parseString(opJson)
+                                        .asJsonObject
+                                        .get("clock")?.asLong ?: 0L
+                                } catch (e: Exception) { 0L }
+                            }
+
                             val historyResponse = JsonObject().apply {
                                 addProperty("type", MessageType.HISTORY)
-                                add("operations", gson.toJsonTree(history))
+                                add("operations", gson.toJsonTree(sortedHistory))
                                 addProperty("sessionId", sessionId)
                                 addProperty("clientCount", session.getClientCount())
                             }
                             send(Frame.Text(gson.toJson(historyResponse)))
 
+                            // Tell new client about everyone already in the session
+                            existingClients.forEach { existingClient ->
+                                val existingUserMsg = JsonObject().apply {
+                                    addProperty("type", MessageType.JOIN)
+                                    addProperty("siteId", existingClient.siteId)
+                                    addProperty("userName", existingClient.userName)
+                                    addProperty("userColor", existingClient.userColor)
+                                }
+                                send(Frame.Text(gson.toJson(existingUserMsg)))
+                            }
+
+                            // Tell everyone else that this person joined
                             val joinNotice = JsonObject().apply {
                                 addProperty("type", MessageType.JOIN)
                                 addProperty("siteId", siteId)
@@ -64,6 +89,7 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                                 addProperty("userColor", userColor)
                             }
                             session.broadcast(gson.toJson(joinNotice), excludeSiteId = siteId)
+
                             println("[Routes] $userName joined session $sessionId")
                         }
 
@@ -87,6 +113,12 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                                     val clientHighest = vectorClock?.get(opSiteId)?.asLong ?: 0L
                                     opClock > clientHighest
                                 } catch (e: Exception) { false }
+                            }.sortedBy { opJson ->
+                                try {
+                                    JsonParser.parseString(opJson)
+                                        .asJsonObject
+                                        .get("clock")?.asLong ?: 0L
+                                } catch (e: Exception) { 0L }
                             }
                             val syncResponse = JsonObject().apply {
                                 addProperty("type", MessageType.SYNC_RESPONSE)
@@ -102,6 +134,7 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                     println("[Routes] Error processing message: ${e.message}")
                 }
             }
+
         } catch (e: Exception) {
             println("[Routes] WebSocket error for $clientSiteId: ${e.message}")
         } finally {
