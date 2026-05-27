@@ -12,6 +12,23 @@ import io.ktor.websocket.*
 
 private val gson = Gson()
 
+// Sort operations to match CrdtDocument.integrate() ordering:
+// (clock ASC, siteId ASC) — lower clock goes left (inserted earlier),
+// same clock uses siteId as tiebreaker.
+// This ensures history replay produces identical CRDT state on all devices.
+private fun sortOps(ops: List<String>): List<String> {
+    return ops.sortedWith(compareBy(
+        { opJson ->
+            try { JsonParser.parseString(opJson).asJsonObject.get("clock")?.asLong ?: 0L }
+            catch (e: Exception) { 0L }
+        },
+        { opJson ->
+            try { JsonParser.parseString(opJson).asJsonObject.get("siteId")?.asString ?: "" }
+            catch (e: Exception) { "" }
+        }
+    ))
+}
+
 fun Routing.syncRoutes(sessionManager: SessionManager) {
     webSocket("/session/{sessionId}") {
         val sessionId = call.parameters["sessionId"] ?: run {
@@ -41,7 +58,6 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                             val userColor = json.get("userColor").asString
                             clientSiteId = siteId
 
-                            // Get existing clients BEFORE adding the new one
                             val existingClients = session.getExistingClients(excludeSiteId = siteId)
 
                             val client = Client(
@@ -52,15 +68,7 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                             )
                             session.addClient(client)
 
-                            // Get history and sort by clock for causal ordering
-                            val history = session.getHistory()
-                            val sortedHistory = history.sortedBy { opJson ->
-                                try {
-                                    JsonParser.parseString(opJson)
-                                        .asJsonObject
-                                        .get("clock")?.asLong ?: 0L
-                                } catch (e: Exception) { 0L }
-                            }
+                            val sortedHistory = sortOps(session.getHistory())
 
                             val historyResponse = JsonObject().apply {
                                 addProperty("type", MessageType.HISTORY)
@@ -70,7 +78,6 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                             }
                             send(Frame.Text(gson.toJson(historyResponse)))
 
-                            // Tell new client about everyone already in the session
                             existingClients.forEach { existingClient ->
                                 val existingUserMsg = JsonObject().apply {
                                     addProperty("type", MessageType.JOIN)
@@ -81,7 +88,6 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                                 send(Frame.Text(gson.toJson(existingUserMsg)))
                             }
 
-                            // Tell everyone else that this person joined
                             val joinNotice = JsonObject().apply {
                                 addProperty("type", MessageType.JOIN)
                                 addProperty("siteId", siteId)
@@ -105,7 +111,7 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                         MessageType.SYNC_REQUEST -> {
                             val vectorClock = json.getAsJsonObject("vectorClock")
                             val history = session.getHistory()
-                            val missingOps = history.filter { opJson ->
+                            val missingOps = sortOps(history.filter { opJson ->
                                 try {
                                     val op = JsonParser.parseString(opJson).asJsonObject
                                     val opSiteId = op.get("siteId")?.asString ?: return@filter false
@@ -113,13 +119,7 @@ fun Routing.syncRoutes(sessionManager: SessionManager) {
                                     val clientHighest = vectorClock?.get(opSiteId)?.asLong ?: 0L
                                     opClock > clientHighest
                                 } catch (e: Exception) { false }
-                            }.sortedBy { opJson ->
-                                try {
-                                    JsonParser.parseString(opJson)
-                                        .asJsonObject
-                                        .get("clock")?.asLong ?: 0L
-                                } catch (e: Exception) { 0L }
-                            }
+                            })
                             val syncResponse = JsonObject().apply {
                                 addProperty("type", MessageType.SYNC_RESPONSE)
                                 add("operations", gson.toJsonTree(missingOps))
